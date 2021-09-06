@@ -1,0 +1,125 @@
+---
+title: "PCA Analysis of park `r wp_code` for fault: `r fault`"
+author: "SmartIve:ABM - JJCA - BEJG"
+date: "`r format(Sys.time(), '%Y/%m/%d')`"
+geometry: margin=1cm
+output: html_document
+---
+
+```{r echo=FALSE, include=FALSE}
+Sys.setenv(TZ='UTC')
+knitr::opts_chunk$set(echo=FALSE, warning=FALSE, message=FALSE) # fig.width=12, fig.height=8, fig.path='Figs/',
+
+#Dependencia basica
+if(!exists("dependencyLoader")){
+    if( !file.exists(paste0(parent_directory,'/functions/dependencyLoader.R')) ) 
+        return(list(error=TRUE,data=NULL,
+                    msg=paste0("\n",iam,": Missing dependency function: functions/dependencyLoader.R")));
+    source( paste0(parent_directory,'/functions/dependencyLoader.R') )
+}
+
+# Sources
+#libraries<-c('plyr','dplyr','plotly','RMySQL', 'rmarkdown','stringr','AppliedPredictiveModeling','htmltools','reshape2','scales','knitr','xtable')
+libraries<-c('ggbiplot', 'rmarkdown','knitr')
+sources<-paste0(parent_directory,"/functions/", 
+                c('calcule_master_analysis.R',
+                  'filter_plot.R',
+                  'predict_intervals_plot.R',
+                  'get_file_path.R',
+                  'fix_horizon_name.R',
+                  'get_unhealthy.R',
+                  'format_wtdata.R',
+                  'queryDB.R',
+                  'close_protocol.R',
+                  'get_alarm_description.R',
+                  'check_acciona_rules.R',
+                  'get_kappa.R',
+                  'get_wind_power_variableName.R'))
+#dep<-dependencyLoader(c(libraries,sources))
+dep<-dependencyLoader(libraries)
+if(dep$error) stop(iam,":on call dependencyLoader\n",dep$msg)
+rm(dep)
+```
+
+```{r pca,results = 'asis',echo=FALSE,message=FALSE,warning=FALSE, plotly=TRUE,eval=TRUE,fig.width=14,fig.height=9,fig.align='center',fig.retina=1}
+palete<-c("ok"="#088A08","0"="#8D003D","1"="#A40004","2"="#FD0006","3"="#FD0006","4"="#FE3F44","5"="#FE3F44","6"="#FE7276","7"="#FE7276")
+for(i in 1:length(turbines)){
+    currentTurbine<-turbines[[i]]
+    cat(paste0("\n\n## Turbine ld_id:",currentTurbine$ld_id,"\n\n"))
+    df <- fortify(currentTurbine$pca, scale = 1, equalize = FALSE)
+    df$target_days<-"ok"
+    df$size_val<-0.5
+    df$alpha_val<-0.1
+    target<-currentTurbine$target
+    date_aggregated<-as.POSIXct((as.numeric(target$date_time)%/%seconds_to_aggregate)*seconds_to_aggregate,origin='1970-01-01',TZ='UTC')
+    date_day_aggregated<-as.POSIXct((as.numeric(target$date_time)%/%86400)*86400,origin='1970-01-01',TZ='UTC')
+    
+    if(any(target[,target_name]==1)){
+        target_on<-target$date_time[target[,target_name]==1]
+        days_remove_ok<-unique(as.POSIXct((as.numeric(target_on)%/%86400)*86400,origin='1970-01-01',TZ='UTC'))
+        if(!is.null(target_on)&&length(target_on)>0){
+        for(aid in 1:length(target_on)){
+            for(d in 0:7){
+                target_prev<-as.POSIXct(target_on[aid],origin='1970-01-01',TZ='UTC')-as.difftime(d, units="days")
+                #alarm_on<-alarm_daybefore$date_time[alarm_daybefore$alarm==1]
+                if(d==0){
+                    aggregate<-3600#Mark latest hour
+                    target_prev<-as.POSIXct((as.numeric(target_prev)%/%aggregate)*aggregate,origin='1970-01-01',TZ='UTC')
+                    id_calculate_avg<-which(target$date_time %in% target_prev)
+                }else{
+                    aggregate<-86400
+                    target_prev<-as.POSIXct((as.numeric(target_prev)%/%aggregate)*aggregate,origin='1970-01-01',TZ='UTC')
+                    id_calculate_avg<-which(date_aggregated %in% target_prev)
+                }
+                a<-apply(df[id_calculate_avg,!(names(df) %in% c("target_days","size_val","alpha_val"))],2,function(col) mean(col,na.rm=TRUE))
+                df[id_calculate_avg,!(names(df) %in% c("target_days","size_val","alpha_val"))]<-a
+                df$target_days[id_calculate_avg]<-d
+                df$size_val[id_calculate_avg]<-0.6
+                df$alpha_val[id_calculate_avg]<-0.2
+                #Remove all except one.
+                to_remove<-NULL
+                if(!is.null(id_calculate_avg)&&length(id_calculate_avg)>1) to_remove<-id_calculate_avg[2:length(id_calculate_avg)]
+                if(!is.null(to_remove)) df[-to_remove,]
+            }
+        }
+        }
+        #Remove days ok points with alarms
+        df<-df[-which((date_day_aggregated %in% days_remove_ok)&(df$target_days=="ok")),]
+    }
+    cat(paste0("\n\n### PC1 vs PC2\n\n"))
+p<-ggplot(df, aes(x =PC1, y=PC2) ) +
+    geom_point(data = subset(df, target_days == "ok"),aes(color=target_days,alpha=alpha_val)) +
+    geom_point(data = subset(df, target_days != "ok"),aes(color=target_days,alpha=alpha_val)) +
+    geom_axis(data = attr(df, "basis"), aes(label = .name),color="#0040FF")+
+    scale_colour_manual(values=palete)+
+    theme(legend.direction = 'horizontal', legend.position = 'bottom')+
+    scale_alpha(guide='none')+
+    xlab(paste0("PC1 ",round((currentTurbine$pca$sdev[1]^2/sum(currentTurbine$pca$sdev^2))*100,digits=1),"%"))+
+    ylab(paste0("PC2 ",round((currentTurbine$pca$sdev[2]^2/sum(currentTurbine$pca$sdev^2))*100,digits=1),"%"))+
+    ggtitle(paste0("ld_id:",currentTurbine$ld_id," PC1 vs PC2"))
+print(p)
+    cat(paste0("\n\n### PC2 vs PC3\n\n"))
+p<-ggplot(df, aes(x =PC2, y=PC3) ) +
+    geom_point(data = subset(df, target_days == "ok"),aes(color=target_days,alpha=alpha_val)) +
+    geom_point(data = subset(df, target_days != "ok"),aes(color=target_days,alpha=alpha_val)) +
+    geom_axis(data = attr(df, "basis"), aes(label = .name),color="#0040FF")+
+    scale_colour_manual(values=palete)+
+    theme(legend.direction = 'horizontal', legend.position = 'bottom')+
+    scale_alpha(guide='none')+
+    xlab(paste0("PC2 ",round((currentTurbine$pca$sdev[2]^2/sum(currentTurbine$pca$sdev^2))*100,digits=1),"%"))+
+    ylab(paste0("PC3 ",round((currentTurbine$pca$sdev[3]^2/sum(currentTurbine$pca$sdev^2))*100,digits=1),"%"))+
+    ggtitle(paste0("ld_id:",currentTurbine$ld_id," PC2 vs PC3"))
+print(p)
+}
+#print(p)
+```
+
+```{r echo=FALSE, include=FALSE}
+# system("free -h", intern = F)
+# cat("Cleaning everething before leaving in order to release memory for the next report")
+rm(list = ls())
+gc()
+
+# system("free -h", intern = F)
+
+```
